@@ -9,10 +9,14 @@ on:
     branches:
       - master
 
+# Mínimo privilegio: el GITHUB_TOKEN del workflow solo puede leer el repositorio
 permissions:
   contents: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. SCA - Análisis de dependencias (npm audit)
+  # ---------------------------------------------------------------------------
   dependency-audit:
     name: Audit npm dependencies
     runs-on: ubuntu-latest
@@ -30,6 +34,9 @@ jobs:
       - name: Audit dependencies
         run: npm audit --audit-level=high
 
+  # ---------------------------------------------------------------------------
+  # 2. Secret Scanning (Gitleaks)
+  # ---------------------------------------------------------------------------
   secret-scan:
     name: Scan for secrets
     runs-on: ubuntu-latest
@@ -57,25 +64,90 @@ jobs:
       - name: Scan repository history for secrets
         run: gitleaks git --redact --exit-code 1 .
 
-  build:
-    name: Build
-    runs-on: ubuntu-latest  # This specifies the OS for the job
+  # ---------------------------------------------------------------------------
+  # 3. NUEVO CONTROL - SAST: análisis estático del código propio (Semgrep)
+  #    Bloquea el despliegue si encuentra hallazgos de severidad ERROR.
+  # ---------------------------------------------------------------------------
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # Checks out the code from your repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Semgrep
+        run: pip install semgrep==1.184.0
+
+      - name: Run Semgrep (JavaScript + React rules)
+        run: |
+          semgrep scan \
+            --config p/javascript \
+            --config p/react \
+            --severity ERROR \
+            --metrics=off \
+            --error \
+            --json --output semgrep-report.json \
+            src
+          # Muestra el resumen también en el log del job
+          semgrep scan --config p/javascript --config p/react --metrics=off src
+
+      - name: Upload Semgrep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+
+  # ---------------------------------------------------------------------------
+  # 4. NUEVO CONTROL - SBOM: inventario de componentes de software (Syft)
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: Generate SBOM (Syft)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          artifact-name: sbom-labs15c.spdx.json
+
+  # ---------------------------------------------------------------------------
+  # 5. Build
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4  # Sets up the Node.js environment
+        uses: actions/setup-node@v4
         with:
-          node-version: 20  # Node 20: requerido por las dependencias parcheadas
+          node-version: 20   # Las versiones parcheadas de las dependencias requieren Node >= 20
+          cache: npm
 
       - name: Install dependencies
-        run: npm install  # Installs the required dependencies
+        run: npm ci   # Instalación reproducible desde package-lock.json
 
       - name: Build the app
-        run: npm run build  # Builds the React app for production
+        run: npm run build
 
+  # ---------------------------------------------------------------------------
+  # 6. Tests
+  # ---------------------------------------------------------------------------
   tests:
     name: Run Tests
     needs: build
@@ -84,43 +156,45 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        
+
       - name: Use Node.js 20.x to run Test
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
-          
+          cache: npm
+
       - name: Install Dependencies
         run: npm ci
-        
+
       - name: Run Tests
         run: npm run test
 
-      #- name: Build the app
-      #  run: npm run build  # Builds the React app for production
-  # Job to deploy the application after build
+  # ---------------------------------------------------------------------------
+  # 7. Deploy a Vercel (Quality Gate: solo si TODOS los controles pasan)
+  # ---------------------------------------------------------------------------
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    needs: [tests, dependency-audit, secret-scan]
+    needs: [tests, dependency-audit, secret-scan, sast, sbom]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
 
     outputs:
       vercel_url: ${{ steps.deploy-vercel.outputs.DEPLOY_URL }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4 #  Re-checks out the code for deployment
+        uses: actions/checkout@v4
 
       - name: Deploy to Vercel
         id: deploy-vercel
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        # 💡 Usamos --confirm y limpiamos la salida para extraer SOLO la URL limpia
         run: |
           URL=$(npx vercel --prod --yes --token $VERCEL_TOKEN | tail -n 1)
           echo "DEPLOY_URL=$URL" >> $GITHUB_OUTPUT
 
+  # ---------------------------------------------------------------------------
+  # 8. Pruebas E2E con Cypress sobre la aplicación desplegada
+  # ---------------------------------------------------------------------------
   cypress-e2e:
     name: Cypress E2E Tests
     runs-on: ubuntu-latest
@@ -130,27 +204,27 @@ jobs:
       - name: Checkout Cypress repo
         uses: actions/checkout@v4
         with:
+          # REEMPLAZA: tu usuario de GitHub / nombre de tu repositorio de Cypress
           repository: 'JairML/cypress15'
           token: ${{ secrets.MI_GITHUB_TOKEN_REPOS }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18.x
+          node-version: 20
 
       - name: Force Install Cypress Module
         run: npm install cypress --save-dev
 
       - name: Debug URL
         run: echo "La URL recibida de Vercel es ${{ needs.deploy.outputs.vercel_url }}"
-          
+
       - name: Run Cypress Tests
         uses: cypress-io/github-action@v6
         env:
           CYPRESS_BASE_URL: ${{ needs.deploy.outputs.vercel_url }}
           CYPRESS_SCREENSHOT_ON_RUN_FAILURE: false
           CYPRESS_VIDEO: false
-          # 💡 Evita problemas de renderizado de fuentes/gráficas virtuales en Linux sin GUI
           ELECTRON_DISABLE_GPU: 1
           DISABLE_X1IR_WORKAROUNDS: true
         with:
@@ -158,5 +232,4 @@ jobs:
           component: false
           record: false
           publish-summary: true
-          # 💡 Forzamos el uso de Chrome en lugar de Electron, ya que gestiona mejor la memoria en GitHub Actions
-          browser: chrome 
+          browser: chrome
