@@ -63,12 +63,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2  # Checks out the code from your repository
+        uses: actions/checkout@v4  # Checks out the code from your repository
 
       - name: Set up Node.js
-        uses: actions/setup-node@v2  # Sets up the Node.js environment
+        uses: actions/setup-node@v4  # Sets up the Node.js environment
         with:
-          node-version: '16'  # Specifies the version of Node.js
+          node-version: 20  # Node 20: requerido por las dependencias parcheadas
 
       - name: Install dependencies
         run: npm install  # Installs the required dependencies
@@ -83,12 +83,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         
-      - name: Use Node.js 18.x to run Test
-        uses: actions/setup-node@v3
+      - name: Use Node.js 20.x to run Test
+        uses: actions/setup-node@v4
         with:
-          node-version: 18.x
+          node-version: 20
           cache: 'npm'
           
       - name: Install Dependencies
